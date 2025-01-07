@@ -9,7 +9,7 @@ NotiTron is a Discord bot designed to help students and users keep track of upco
 - **Add Task**: Users can easily add assignments by providing the class name, assignment name, and due date in either MM/DD/YY or MM/DD/YYYY format.
 - **Task Notifications**: The bot sends reminders when an assignment is due within 24 hours or if it is due on the same day.
 - **Automatic Task Cleanup**: Tasks that have passed their due dates are automatically deleted from the system every 24 hours to keep the task list up to date.
-- **Customizable Timezone Support**: The bot is set to the Pacific Standard Time (PST) timezone, ensuring that deadlines are tracked correctly for users in that region.
+- **Customizable Time Zone Support**: The bot is set to the Pacific Standard Time (PST) time zone, ensuring that deadlines are tracked correctly for users in that region.
 
 ## Technologies Used
 
