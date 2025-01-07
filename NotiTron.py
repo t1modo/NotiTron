@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands, tasks
 from pymongo import MongoClient
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import pytz
 import os
 from dotenv import load_dotenv
@@ -35,8 +35,8 @@ async def on_ready():
     if guild:
         await bot.tree.sync(guild=guild)  # Sync commands to a specific guild
     
-    # Start the task to delete expired tasks
-    delete_expired_tasks.start()
+    # Start the task to check tasks at 12 AM PST
+    check_tasks_at_midnight.start()
 
 # Slash command to add a task
 @bot.tree.command(name="add_task", description="All field types are strings. The due date should be entered as MM/DD/YY.")
@@ -64,6 +64,7 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             "assignment_name": assignment_name,
             "due_date": due_datetime_str,
             "author": interaction.user.name,
+            "user_id": interaction.user.id,
             "completed": False,
         }
         tasks_collection.insert_one(task)  # Insert into MongoDB
@@ -80,22 +81,6 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
 
         await interaction.response.send_message(embed=embed)
 
-        # Now localize "now" to match the timezone (PST) of "due_datetime"
-        now = datetime.now(timezone)
-
-        # Ensure both `due_datetime` and `now` are timezone-aware
-        time_diff = due_datetime - now
-        if time_diff <= timedelta(days=1) and time_diff > timedelta():
-            await interaction.channel.send(f"<@{interaction.user.id}>, your task '{assignment_name}' is due in less than 24 hours!")
-
-        # Check if the due date matches today's date
-        today = now.date()  # Get today's date in PST
-        due_date_only = due_datetime.date()  # Extract the date part of the due date
-
-        # If assignment due date is today, ping the user
-        if due_date_only == today:
-            await interaction.channel.send(f"<@{interaction.user.id}>, your assignment '{assignment_name}' is due today! Don't forget to submit it!")
-
     except Exception as e:
         # Check if the interaction has already been responded to
         if not interaction.response.is_done():
@@ -103,19 +88,36 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         else:
             print(f"Error: {e}")
 
-# Background task to delete expired tasks
-@tasks.loop(hours=24)  # Runs every 24 hours
-async def delete_expired_tasks():
+# Background task to check tasks at 12 AM PST
+@tasks.loop(time=time(0, 0, 0))
+async def check_tasks_at_midnight():
     now = datetime.now(timezone)
-    # Convert current time to ISO format string for comparison
-    now_str = now.isoformat()
 
-    # Find and delete tasks with due dates earlier than the current time
-    expired_tasks = tasks_collection.find({"due_date": {"$lt": now_str}, "completed": False})
+    # Notify users about tasks due in less than 24 hours or today
+    tasks_due_soon = tasks_collection.find({"completed": False})
+    for task in tasks_due_soon:
+        due_datetime = datetime.fromisoformat(task["due_date"])
+
+        # Ensure both "due_datetime" and "now" are timezone-aware
+        time_diff = due_datetime - now
+
+        if timedelta(days=0) < time_diff <= timedelta(days=1):  # Task due in less than 24 hours
+            user_id = task["user_id"]
+            await bot.get_channel(task["channel_id"]).send(
+                f"<@{user_id}>, your task '{task['assignment_name']}' is due in less than 24 hours!"
+            )
+        elif due_datetime.date() == now.date():  # Task due today
+            user_id = task["user_id"]
+            await bot.get_channel(task["channel_id"]).send(
+                f"<@{user_id}>, your task '{task['assignment_name']}' is due today! Don't forget to submit it!"
+            )
+
+    # Delete expired tasks
+    expired_tasks = tasks_collection.find({"due_date": {"$lt": now.isoformat()}, "completed": False})
     for task in expired_tasks:
         tasks_collection.delete_one({"_id": task["_id"]})
 
-    print(f"Checked for expired tasks at {now}.")
+    print(f"Checked tasks at {now}.")
 
 # Run the bot
 if __name__ == "__main__":
