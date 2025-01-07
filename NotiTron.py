@@ -39,7 +39,7 @@ async def on_ready():
     delete_expired_tasks.start()
 
 # Slash command to add a task
-@bot.tree.command(name="add_task", description="All field types are stings. The due date should be entered as MM/DD/YY.")
+@bot.tree.command(name="add_task", description="All field types are strings. The due date should be entered as MM/DD/YY.")
 async def add_task(interaction: discord.Interaction, class_name: str, assignment_name: str, due_date: str):
     # Ensure the command is only usable in your guild
     if interaction.guild.id != GUILD_ID:
