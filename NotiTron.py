@@ -65,6 +65,7 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             "due_date": due_datetime_str,
             "author": interaction.user.name,
             "user_id": interaction.user.id,
+            "channel_id": interaction.channel.id,  # Save the channel ID where the task was added
             "completed": False,
         }
         tasks_collection.insert_one(task)  # Insert into MongoDB
@@ -89,35 +90,50 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             print(f"Error: {e}")
 
 # Background task to check tasks at 12 AM PST
-@tasks.loop(time=time(0, 0, 0))
+@tasks.loop(time=time(0, 0, 0))  # Runs daily at 12 AM PST
 async def check_tasks_at_midnight():
-    now = datetime.now(timezone)
+    now = datetime.now(timezone)  # Current time in PST
 
-    # Notify users about tasks due in less than 24 hours or today
-    tasks_due_soon = tasks_collection.find({"completed": False})
-    for task in tasks_due_soon:
-        due_datetime = datetime.fromisoformat(task["due_date"])
+    # Tasks due today (at 11:59 PM)
+    tasks_due_today = tasks_collection.find({
+        "completed": False,
+        "due_date": {
+            "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+            "$lte": now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
+        }
+    })
 
-        # Ensure both "due_datetime" and "now" are timezone-aware
-        time_diff = due_datetime - now
+    # Notify authors of tasks due today
+    for task in tasks_due_today:
+        user_id = task["user_id"]
+        class_name = task["class_name"]
+        assignment_name = task["assignment_name"]
 
-        if timedelta(days=0) < time_diff <= timedelta(days=1):  # Task due in less than 24 hours
-            user_id = task["user_id"]
-            await bot.get_channel(task["channel_id"]).send(
-                f"<@{user_id}>, your task '{task['assignment_name']}' is due in less than 24 hours!"
+        # Fetch channel to send the notification (requires a valid channel_id in your database)
+        # If `channel_id` isn't available, send to the user's DMs
+        channel_id = task.get("channel_id")
+        channel = bot.get_channel(channel_id) if channel_id else None
+        user = await bot.fetch_user(user_id)
+
+        if channel:
+            await channel.send(
+                f"<@{user_id}>, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
             )
-        elif due_datetime.date() == now.date():  # Task due today
-            user_id = task["user_id"]
-            await bot.get_channel(task["channel_id"]).send(
-                f"<@{user_id}>, your task '{task['assignment_name']}' is due today! Don't forget to submit it!"
+        else:  # Send DM if no channel is provided
+            await user.send(
+                f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
             )
 
-    # Delete expired tasks
-    expired_tasks = tasks_collection.find({"due_date": {"$lt": now.isoformat()}, "completed": False})
+    # Remove expired tasks (those due before today)
+    expired_tasks = tasks_collection.find({
+        "completed": False,
+        "due_date": {"$lt": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()}
+    })
+
     for task in expired_tasks:
         tasks_collection.delete_one({"_id": task["_id"]})
 
-    print(f"Checked tasks at {now}.")
+    print(f"Checked and notified tasks at {now}. Deleted expired tasks.")
 
 # Run the bot
 if __name__ == "__main__":
