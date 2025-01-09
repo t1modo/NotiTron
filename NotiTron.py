@@ -26,17 +26,27 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 # Timezone setup (PST)
 timezone = pytz.timezone("America/Los_Angeles")
 
+
 # Slash command setup
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+
     # Register commands after bot is ready
     guild = bot.get_guild(GUILD_ID)
     if guild:
         await bot.tree.sync(guild=guild)  # Sync commands to a specific guild
-    
-    # Start the task to check tasks at 12 AM PST
-    check_tasks_at_midnight.start()
+
+    # Start the background task if not already running
+    if not check_tasks_at_midnight.is_running():
+        check_tasks_at_midnight.start()
+
+    # Handle missed checks (if the bot reconnects after midnight)
+    now = datetime.now(timezone)
+    if now.hour == 0:  # If reconnecting after 12 AM
+        print("Reconnecting after midnight, running task check.")
+        await check_tasks_at_midnight()
+
 
 # Slash command to add a task
 @bot.tree.command(name="add_task", description="All field types are strings. The due date should be entered as MM/DD/YY.")
@@ -89,51 +99,58 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         else:
             print(f"Error: {e}")
 
+
 # Background task to check tasks at 12 AM PST
 @tasks.loop(time=time(0, 0, 0))  # Runs daily at 12 AM PST
 async def check_tasks_at_midnight():
-    now = datetime.now(timezone)  # Current time in PST
+    now = datetime.now(timezone)
+    print(f"Running check_tasks_at_midnight at {now}")
 
-    # Tasks due today (at 11:59 PM)
-    tasks_due_today = tasks_collection.find({
-        "completed": False,
-        "due_date": {
-            "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
-            "$lte": now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
-        }
-    })
+    try:
+        # Tasks due today (at 11:59 PM)
+        tasks_due_today = tasks_collection.find({
+            "completed": False,
+            "due_date": {
+                "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+                "$lte": now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
+            }
+        })
 
-    # Notify authors of tasks due today
-    for task in tasks_due_today:
-        user_id = task["user_id"]
-        class_name = task["class_name"]
-        assignment_name = task["assignment_name"]
+        # Notify authors of tasks due today
+        for task in tasks_due_today:
+            user_id = task["user_id"]
+            class_name = task["class_name"]
+            assignment_name = task["assignment_name"]
 
-        # Fetch channel to send the notification (requires a valid channel_id in your database)
-        # If `channel_id` isn't available, send to the user's DMs
-        channel_id = task.get("channel_id")
-        channel = bot.get_channel(channel_id) if channel_id else None
-        user = await bot.fetch_user(user_id)
+            # Fetch channel to send the notification (requires a valid channel_id in your database)
+            channel_id = task.get("channel_id")
+            channel = bot.get_channel(channel_id) if channel_id else None
+            user = await bot.fetch_user(user_id)
 
-        if channel:
-            await channel.send(
-                f"<@{user_id}>, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
-            )
-        else:  # Send DM if no channel is provided
-            await user.send(
-                f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
-            )
+            if channel:
+                await channel.send(
+                    f"<@{user_id}>, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
+                )
+            else:  # Send DM if no channel is provided
+                await user.send(
+                    f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
+                )
 
-    # Remove expired tasks (those due before today)
-    expired_tasks = tasks_collection.find({
-        "completed": False,
-        "due_date": {"$lt": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()}
-    })
+        # Handle overdue tasks (expired before today)
+        expired_tasks = tasks_collection.find({
+            "completed": False,
+            "due_date": {"$lt": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()}
+        })
 
-    for task in expired_tasks:
-        tasks_collection.delete_one({"_id": task["_id"]})
+        for task in expired_tasks:
+            tasks_collection.delete_one({"_id": task["_id"]})
+            print(f"Deleted expired task: {task}")
 
-    print(f"Checked and notified tasks at {now}. Deleted expired tasks.")
+        print(f"Task check completed at {now}. Notified users and removed expired tasks.")
+
+    except Exception as e:
+        print(f"Error in check_tasks_at_midnight: {e}")
+
 
 # Run the bot
 if __name__ == "__main__":
