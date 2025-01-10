@@ -106,7 +106,6 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         # Send embed and add reactions
         reminder_message = await interaction.response.send_message(embed=embed)
         reminder_message = await interaction.original_response()
-        await reminder_message.add_reaction("✅")
 
         def check(reaction, user):
             return user == interaction.user and reaction.message.id == reminder_message.id and (
@@ -115,20 +114,35 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
 
         # Wait for reactions
         while True:
-            reaction, user = await bot.wait_for("reaction_add", timeout=86400.0, check=check)
-            if str(reaction.emoji).isdigit():
-                second_reminder_hours = int(str(reaction.emoji))
-                task["second_reminder"] = second_reminder_hours
-                tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"second_reminder": second_reminder_hours}})
-                await reminder_message.reply(f"Second reminder set {second_reminder_hours} hours before due.")
-            elif str(reaction.emoji) == "✅":
-                tasks_collection.delete_one({"_id": task["_id"]})
+            try:
+                reaction, user = await bot.wait_for("reaction_add", timeout=86400.0, check=check)
+                if str(reaction.emoji).isdigit():
+                    second_reminder_hours = int(str(reaction.emoji))
+                    task["second_reminder"] = second_reminder_hours
+                    tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"second_reminder": second_reminder_hours}})
 
-                # Change the embed color to green and update it
-                embed.color = discord.Color.green()
-                embed.title = f"Task Completed: {assignment_name}"
-                await reminder_message.edit(embed=embed)
-                await reminder_message.reply("Task marked as completed and removed from the database.")
+                    # Calculate and format the second reminder time
+                    due_datetime = datetime.fromisoformat(task["due_date"])  # Retrieve the due date
+                    second_reminder_time = due_datetime - timedelta(hours=second_reminder_hours)
+                    formatted_second_reminder_time = second_reminder_time.strftime("%m/%d/%Y at %I:%M %p")
+
+                    # Send a confirmation message to the user
+                    confirmation_message = (
+                        f"You will receive a second reminder **{second_reminder_hours} hours** before "
+                        f"**{assignment_name}** is due, at **{formatted_second_reminder_time}**."
+                    )
+                    await reminder_message.reply(confirmation_message)
+                elif str(reaction.emoji) == "✅":
+                    tasks_collection.delete_one({"_id": task["_id"]})
+
+                    # Change the embed color to green and update it
+                    embed.color = discord.Color.green()
+                    embed.title = f"Task Completed: {assignment_name}"
+                    await reminder_message.edit(embed=embed)
+                    await reminder_message.reply("Task marked as completed and removed from the database.")
+                    break
+            except asyncio.TimeoutError:
+                print("Timeout reached waiting for reaction.")
                 break
 
     except Exception as e:
