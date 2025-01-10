@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, time
 import pytz
 import os
 from dotenv import load_dotenv
+import asyncio
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,15 +38,9 @@ async def on_ready():
         await bot.tree.sync()
         print("Slash commands synced successfully.")
 
-        # Start background task
-        if not check_tasks_at_midnight.is_running():
-            check_tasks_at_midnight.start()
-
-        # Handle missed midnight checks
-        now = datetime.now(timezone)
-        if now.hour == 0:  # If reconnecting after midnight
-            print("Reconnecting after midnight, running task check.")
-            await check_tasks_at_midnight()
+        # Start background tasks
+        if not check_tasks_every_minute.is_running():
+            check_tasks_every_minute.start()
 
     except Exception as e:
         print(f"Error in on_ready: {e}")
@@ -86,6 +81,7 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             "user_id": interaction.user.id,
             "channel_id": interaction.channel.id,
             "completed": False,
+            "second_reminder_sent": False,  # New flag to track if second reminder has been sent
         }
         tasks_collection.insert_one(task)
 
@@ -107,17 +103,21 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         reminder_message = await interaction.response.send_message(embed=embed)
         reminder_message = await interaction.original_response()
 
+        # Add number reactions from 1️⃣ to 9️⃣ and checkmark ✅
+        for emoji in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "✅"]:
+            await reminder_message.add_reaction(emoji)
+
         def check(reaction, user):
             return user == interaction.user and reaction.message.id == reminder_message.id and (
-                str(reaction.emoji).isdigit() or str(reaction.emoji) == "✅"
+                str(reaction.emoji) in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"] or str(reaction.emoji) == "✅"
             )
 
         # Wait for reactions
         while True:
             try:
                 reaction, user = await bot.wait_for("reaction_add", timeout=86400.0, check=check)
-                if str(reaction.emoji).isdigit():
-                    second_reminder_hours = int(str(reaction.emoji))
+                if str(reaction.emoji) in ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"]:  # Match the emoji directly
+                    second_reminder_hours = int(str(reaction.emoji)[0])  # Extract the number from the emoji
                     task["second_reminder"] = second_reminder_hours
                     tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"second_reminder": second_reminder_hours}})
 
@@ -126,18 +126,19 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
                     second_reminder_time = due_datetime - timedelta(hours=second_reminder_hours)
                     formatted_second_reminder_time = second_reminder_time.strftime("%m/%d/%Y at %I:%M %p")
 
-                    # Send a confirmation message to the user
+                    # Send confirmation message to the channel
                     confirmation_message = (
                         f"You will receive a second reminder **{second_reminder_hours} hours** before "
-                        f"**{assignment_name}** is due, at **{formatted_second_reminder_time}**."
+                        f"**{task['assignment_name']}** is due, at **{formatted_second_reminder_time}**."
                     )
                     await reminder_message.reply(confirmation_message)
-                elif str(reaction.emoji) == "✅":
+
+                elif str(reaction.emoji) == "✅":  # If the reaction is ✅ (mark task as completed)
                     tasks_collection.delete_one({"_id": task["_id"]})
 
                     # Change the embed color to green and update it
                     embed.color = discord.Color.green()
-                    embed.title = f"Task Completed: {assignment_name}"
+                    embed.title = f"Task Completed: {task['assignment_name']}"
                     await reminder_message.edit(embed=embed)
                     await reminder_message.reply("Task marked as completed and removed from the database.")
                     break
@@ -152,67 +153,79 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             print(f"Error: {e}")
 
 
-# Background task to check tasks at 12 AM PST
-@tasks.loop(time=time(0, 0, 0))
-async def check_tasks_at_midnight():
+# Background task to check tasks every minute and at 12 AM PST
+@tasks.loop(minutes=1)
+async def check_tasks_every_minute():
     now = datetime.now(timezone)
-    print(f"Running check_tasks_at_midnight at {now}")
+    print(f"Running check_tasks_every_minute at {now}")
 
     try:
-        # Tasks due today
-        tasks_due_today = tasks_collection.find({
+        # 1. Check if it's 12 AM PST, and send the first reminder
+        if now.hour == 0 and now.minute == 0:
+            print("It's 12 AM PST - sending reminders for tasks due today.")
+
+            tasks_due_today = tasks_collection.find({
+                "completed": False,
+                "due_date": {
+                    "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
+                    "$lte": now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
+                }
+            })
+
+            for task in tasks_due_today:
+                user_id = task["user_id"]
+                class_name = task["class_name"]
+                assignment_name = task["assignment_name"]
+
+                channel_id = task.get("channel_id")
+                channel = bot.get_channel(channel_id) if channel_id else None
+                user = await bot.fetch_user(user_id)
+
+                if channel:
+                    await channel.send(
+                        f"<@{user_id}>, your task '{assignment_name}' for class '{class_name}' is due today!"
+                    )
+                else:
+                    await user.send(
+                        f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today!"
+                    )
+
+        # 2. Check for second reminders due within 5 minutes
+        tasks_due_soon = tasks_collection.find({
             "completed": False,
-            "due_date": {
-                "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
-                "$lte": now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
-            }
+            "second_reminder": {"$exists": True},
+            "second_reminder_sent": False,  # Only send if the second reminder hasn't been sent
+            "due_date": {"$lt": (now + timedelta(minutes=5)).isoformat()}
         })
 
-        # Notify authors of tasks due today
-        for task in tasks_due_today:
+        for task in tasks_due_soon:
             user_id = task["user_id"]
             class_name = task["class_name"]
             assignment_name = task["assignment_name"]
-
-            channel_id = task.get("channel_id")
-            channel = bot.get_channel(channel_id) if channel_id else None
-            user = await bot.fetch_user(user_id)
-
-            if channel:
-                await channel.send(
-                    f"<@{user_id}>, your task '{assignment_name}' for class '{class_name}' is due today!"
-                )
-            else:
-                await user.send(
-                    f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today!"
-                )
-
             second_reminder = task.get("second_reminder")
+
+            # Send second reminder if it's time
             if second_reminder:
                 reminder_time = datetime.fromisoformat(task["due_date"]) - timedelta(hours=second_reminder)
-                if now < reminder_time:
-                    await bot.wait_until(reminder_time)
-                    if not task["completed"]:
-                        if channel:
-                            await channel.send(
-                                f"<@{user_id}>, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
-                            )
-                        else:
-                            await user.send(
-                                f"Hi {user.name}, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
-                            )
+                if now >= reminder_time:
+                    channel_id = task.get("channel_id")
+                    channel = bot.get_channel(channel_id) if channel_id else None
+                    user = await bot.fetch_user(user_id)
 
-            expired_tasks = tasks_collection.find({
-                "completed": False,
-                "due_date": {"$lt": (now - timedelta(days=1)).isoformat()}
-            })
+                    if channel:
+                        await channel.send(
+                            f"<@{user_id}>, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
+                        )
+                    else:
+                        await user.send(
+                            f"Hi {user.name}, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
+                        )
 
-            for expired_task in expired_tasks:
-                tasks_collection.delete_one({"_id": expired_task["_id"]})
-                print(f"Deleted expired task: {expired_task}")
+                    # Mark the second reminder as sent
+                    tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"second_reminder_sent": True}})
 
     except Exception as e:
-        print(f"Error in check_tasks_at_midnight: {e}")
+        print(f"Error in check_tasks_every_minute: {e}")
 
 
 # Run the bot
