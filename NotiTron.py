@@ -49,21 +49,28 @@ async def on_ready():
 
 
 # Slash command to add a task
-@bot.tree.command(name="add_task", description="All field types are strings. The due date should be entered as MM/DD/YY.")
-async def add_task(interaction: discord.Interaction, class_name: str, assignment_name: str, due_date: str):
+@bot.tree.command(name="add_task", description="Set a reminder for upcoming assignments!")
+async def add_task(interaction: discord.Interaction, class_name: str, assignment_name: str, due_date: str, due_time: str):
     # Ensure the command is only usable in your guild
     if interaction.guild.id != GUILD_ID:
         return  
 
     try:
-        # Try parsing both MM/DD/YY and MM/DD/YYYY formats
+        # Parse due_date
         try:
-            due_datetime = datetime.strptime(due_date, "%m/%d/%y")
+            due_date_parsed = datetime.strptime(due_date, "%m/%d/%y")
         except ValueError:
-            due_datetime = datetime.strptime(due_date, "%m/%d/%Y")
+            due_date_parsed = datetime.strptime(due_date, "%m/%d/%Y")
 
-        # Localize due_datetime to PST
-        due_datetime = timezone.localize(due_datetime)
+        # Parse due_time
+        due_time = due_time.strip().upper().replace(" ", "")
+        due_time_parsed = datetime.strptime(due_time, "%I:%M%p")
+
+        # Combine date and time, then localize to PST
+        due_datetime = timezone.localize(due_date_parsed.replace(
+            hour=due_time_parsed.hour,
+            minute=due_time_parsed.minute
+        ))
 
         # Convert datetime to ISO format (string) for MongoDB
         due_datetime_str = due_datetime.isoformat()
@@ -80,17 +87,47 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         }
         tasks_collection.insert_one(task)  # Insert into MongoDB
 
-        # Format due date for the embed (MM/DD/YY or MM/DD/YYYY)
-        formatted_date = due_datetime.strftime("%m/%d/%y") if len(str(due_datetime.year)) == 2 else due_datetime.strftime("%m/%d/%Y")
+        # Format due date and time for the embed
+        formatted_datetime = due_datetime.strftime("%m/%d/%Y at %I:%M %p")
 
-        # Create an embed with the task info
-        embed = discord.Embed(title=f"Task Added: {assignment_name}", color=discord.Color.green())
+        # Create an embed with the task info (red color for incomplete tasks)
+        embed = discord.Embed(title=f"Task Added: {assignment_name}", color=discord.Color.red())
         embed.add_field(name="Class", value=class_name, inline=True)
         embed.add_field(name="Assignment", value=assignment_name, inline=True)
-        embed.add_field(name="Due Date", value=formatted_date, inline=True)
-        embed.set_footer(text=f"Assigned by {interaction.user.name}")
+        embed.add_field(name="Due Date & Time", value=formatted_datetime, inline=True)
+        embed.set_footer(
+            text="React with a number for hours before the due date for a second reminder.\n"
+                 "React with ✅ when completed (Only the author can react).\n"
+                 "Note: If you don't react with a number, no second reminder will be sent."
+        )
 
-        await interaction.response.send_message(embed=embed)
+        # Send embed and add reactions
+        reminder_message = await interaction.response.send_message(embed=embed)
+        reminder_message = await interaction.original_response()
+        await reminder_message.add_reaction("✅")
+
+        def check(reaction, user):
+            return user == interaction.user and reaction.message.id == reminder_message.id and (
+                str(reaction.emoji).isdigit() or str(reaction.emoji) == "✅"
+            )
+
+        # Wait for reactions
+        while True:
+            reaction, user = await bot.wait_for("reaction_add", timeout=86400.0, check=check)  # Wait for 24 hours max
+            if str(reaction.emoji).isdigit():  # Second reminder time in hours
+                second_reminder_hours = int(str(reaction.emoji))
+                task["second_reminder"] = second_reminder_hours
+                tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"second_reminder": second_reminder_hours}})
+                await reminder_message.reply(f"Second reminder set {second_reminder_hours} hours before due.")
+            elif str(reaction.emoji) == "✅":  # Mark as completed
+                tasks_collection.delete_one({"_id": task["_id"]})
+
+                # Change the embed color to green and update it
+                embed.color = discord.Color.green()
+                embed.title = f"Task Completed: {assignment_name}"
+                await reminder_message.edit(embed=embed)
+                await reminder_message.reply("Task marked as completed and removed from the database.")
+                break
 
     except Exception as e:
         # Check if the interaction has already been responded to
@@ -101,13 +138,13 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
 
 
 # Background task to check tasks at 12 AM PST
-@tasks.loop(time=time(0, 0, 0))  # Runs daily at 12 AM PST
+@tasks.loop(time=time(0, 0, 0))
 async def check_tasks_at_midnight():
     now = datetime.now(timezone)
     print(f"Running check_tasks_at_midnight at {now}")
 
     try:
-        # Tasks due today (at 11:59 PM)
+        # Tasks due today
         tasks_due_today = tasks_collection.find({
             "completed": False,
             "due_date": {
@@ -122,7 +159,7 @@ async def check_tasks_at_midnight():
             class_name = task["class_name"]
             assignment_name = task["assignment_name"]
 
-            # Fetch channel to send the notification (requires a valid channel_id in your database)
+            # Fetch channel to send the notification
             channel_id = task.get("channel_id")
             channel = bot.get_channel(channel_id) if channel_id else None
             user = await bot.fetch_user(user_id)
@@ -136,21 +173,32 @@ async def check_tasks_at_midnight():
                     f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
                 )
 
-            # Remove the task from the database after sending the notification
-            tasks_collection.delete_one({"_id": task["_id"]})
-            print(f"Task '{assignment_name}' for class '{class_name}' has been notified and removed from the database.")
+            # Schedule second reminder if applicable
+            second_reminder = task.get("second_reminder")
+            if second_reminder:
+                reminder_time = datetime.fromisoformat(task["due_date"]) - timedelta(hours=second_reminder)
+                if now < reminder_time:
+                    # Call the task again in the future
+                    await bot.wait_until(reminder_time)
+                    if not task["completed"]:  # Check again if the task was not completed
+                        if channel:
+                            await channel.send(
+                                f"<@{user_id}>, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
+                            )
+                        else:
+                            await user.send(
+                                f"Hi {user.name}, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
+                            )
 
-        # Handle overdue tasks
-        expired_tasks = tasks_collection.find({
-            "completed": False,
-            "due_date": {"$lt": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()}
-        })
+            # Remove expired tasks
+            expired_tasks = tasks_collection.find({
+                "completed": False,
+                "due_date": {"$lt": (now - timedelta(days=1)).isoformat()}
+            })
 
-        for task in expired_tasks:
-            tasks_collection.delete_one({"_id": task["_id"]})
-            print(f"Deleted expired task: {task}")
-
-        print(f"Task check completed at {now}. Notified users and removed expired tasks.")
+            for expired_task in expired_tasks:
+                tasks_collection.delete_one({"_id": expired_task["_id"]})
+                print(f"Deleted expired task: {expired_task}")
 
     except Exception as e:
         print(f"Error in check_tasks_at_midnight: {e}")
