@@ -136,7 +136,11 @@ async def check_tasks_at_midnight():
                     f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today! Don't forget to submit it!"
                 )
 
-        # Handle overdue tasks (expired before today)
+            # Remove the task from the database after sending the notification
+            tasks_collection.delete_one({"_id": task["_id"]})
+            print(f"Task '{assignment_name}' for class '{class_name}' has been notified and removed from the database.")
+
+        # Handle overdue tasks
         expired_tasks = tasks_collection.find({
             "completed": False,
             "due_date": {"$lt": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()}
