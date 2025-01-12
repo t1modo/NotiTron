@@ -4,15 +4,16 @@ from pymongo import MongoClient
 from datetime import datetime, timedelta
 import pytz
 import os
+import asyncio
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
 
 # MongoDB Config
-MONGO_URI = os.getenv("MONGODB_CONNECTION")
+MONGO_URI = os.getenv("MONGODB_CONNECTION", "your_mongodb_connection_string_here")
 db_client = MongoClient(MONGO_URI)
-db = db_client.NotiTronDB  # DB
+db = db_client.NotiTronDB  # Database
 tasks_collection = db.Tasks  # Collection
 
 # Bot Configuration with Message Content Intent
@@ -20,8 +21,8 @@ intents = discord.Intents.default()
 intents.message_content = True  # Enable the message content intent
 bot = commands.Bot(command_prefix="/", intents=intents)
 
-# Load Guild ID from .env file
-GUILD_ID = int(os.getenv("GUILD_ID"))
+# Guild ID
+GUILD_ID = int(os.getenv("GUILD_ID", "your_guild_id_here"))
 
 # Timezone setup (PST)
 timezone = pytz.timezone("America/Los_Angeles")
@@ -44,16 +45,26 @@ async def on_ready():
         print(f"Error in on_ready: {e}")
 
 
-# Reminder View with Buttons
+# Persistent View for "Mark as Complete"
+class PersistentCompleteButton(discord.ui.View):
+    def __init__(self, task):
+        super().__init__(timeout=None)  # No timeout
+        self.add_item(CompleteButton(task))
+
+
+# Reminder View with Dynamic Buttons
 class ReminderView(discord.ui.View):
     def __init__(self, task, interaction):
         super().__init__(timeout=3600)  # Buttons remain active for 1 hour
         self.task = task
         self.interaction = interaction
+        self.reminder_buttons = []
 
         # Add buttons for selecting reminder times
-        for hours in [1, 3, 6, 12]:  # Customize as needed
-            self.add_item(ReminderButton(task, hours))
+        for hours in [1, 3, 6, 12]:
+            button = ReminderButton(task, hours)
+            self.reminder_buttons.append(button)
+            self.add_item(button)
 
         # Add "Mark as Complete" button
         self.add_item(CompleteButton(task))
@@ -65,11 +76,21 @@ class ReminderView(discord.ui.View):
             return False
         return True
 
+    async def handle_reminder_confirmation(self, selected_button):
+        # Disable all reminder buttons except the selected one
+        for button in self.reminder_buttons:
+            if button == selected_button:
+                button.style = discord.ButtonStyle.green
+            else:
+                button.disabled = True  # Disable other buttons
+        await self.interaction.edit_original_response(view=self)
+
     async def on_timeout(self):
-        # Edit the message to disable the buttons after the timeout
+        # Disable all buttons after timeout, except the "Mark as Complete" button
         for child in self.children:
-            child.disabled = True
-        await self.interaction.edit_original_response(content="The buttons have expired.", view=self)
+            if isinstance(child, ReminderButton):
+                child.disabled = True
+        await self.interaction.edit_original_response(content="The buttons have expired, but you can still mark the task as complete.", view=PersistentCompleteButton(self.task))
 
 
 class ReminderButton(discord.ui.Button):
@@ -90,9 +111,13 @@ class ReminderButton(discord.ui.Button):
         due_datetime = datetime.fromisoformat(self.task["due_date"])
         second_reminder_time = due_datetime - timedelta(hours=self.hours)
         formatted_time = second_reminder_time.strftime("%m/%d/%Y at %I:%M %p")
+
         await interaction.response.send_message(
             f"Second reminder set for {self.hours} hours before the due time, at **{formatted_time}**.", ephemeral=True
         )
+
+        # Update the view to reflect the selected button
+        await self.view.handle_reminder_confirmation(self)
 
 
 class CompleteButton(discord.ui.Button):
@@ -176,44 +201,14 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             print(f"Error: {e}")
 
 
-# Background task to check tasks every minute and at 12 AM PST
+# Background task to check tasks every minute and align with whole-minute intervals
 @tasks.loop(minutes=1)
 async def check_tasks_every_minute():
     now = datetime.now(timezone)
     print(f"Running check_tasks_every_minute at {now}")
 
     try:
-        # Check if it's 12 AM PST, and send the first reminder
-        if now.hour == 0 and now.minute == 0:
-            print("It's 12 AM PST - sending reminders for tasks due today.")
-
-            tasks_due_today = tasks_collection.find({
-                "completed": False,
-                "due_date": {
-                    "$gte": now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat(),
-                    "$lte": now.replace(hour=23, minute=59, second=59, microsecond=999999).isoformat()
-                }
-            })
-
-            for task in tasks_due_today:
-                user_id = task["user_id"]
-                class_name = task["class_name"]
-                assignment_name = task["assignment_name"]
-
-                channel_id = task.get("channel_id")
-                channel = bot.get_channel(channel_id) if channel_id else None
-                user = await bot.fetch_user(user_id)
-
-                if channel:
-                    await channel.send(
-                        f"<@{user_id}>, your task '{assignment_name}' for class '{class_name}' is due today!"
-                    )
-                else:
-                    await user.send(
-                        f"Hi {user.name}, your task '{assignment_name}' for class '{class_name}' is due today!"
-                    )
-
-        # Check for second reminders due soon
+        # Check for second reminders and expired tasks
         tasks_due_soon = tasks_collection.find({
             "completed": False,
             "second_reminder": {"$exists": True},
@@ -258,6 +253,14 @@ async def check_tasks_every_minute():
 
     except Exception as e:
         print(f"Error in check_tasks_every_minute: {e}")
+
+
+@check_tasks_every_minute.before_loop
+async def before_check_tasks_every_minute():
+    now = datetime.now(timezone)
+    seconds_to_wait = 60 - now.second
+    print(f"Waiting {seconds_to_wait} seconds to align with the next whole minute.")
+    await asyncio.sleep(seconds_to_wait)
 
 
 # Run the bot
