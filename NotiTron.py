@@ -90,7 +90,12 @@ class ReminderView(discord.ui.View):
         for child in self.children:
             if isinstance(child, ReminderButton):
                 child.disabled = True
-        await self.interaction.edit_original_response(content="The buttons have expired, but you can still mark the task as complete.", view=PersistentCompleteButton(self.task))
+            elif isinstance(child, CompleteButton):
+                child.disabled = False  # Ensure "Mark as Complete" stays enabled
+        await self.interaction.edit_original_response(
+            content="The buttons have expired, but you can still mark the task as complete.",
+            view=self,
+        )
 
 
 class ReminderButton(discord.ui.Button):
@@ -217,7 +222,6 @@ async def check_tasks_every_minute():
 
         for task in tasks_due_soon:
             user_id = task["user_id"]
-            class_name = task["class_name"]
             assignment_name = task["assignment_name"]
             second_reminder = task.get("second_reminder")
 
