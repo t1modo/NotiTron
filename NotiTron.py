@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # MongoDB Config
-MONGO_URI = os.getenv("MONGODB_CONNECTION", "your_mongodb_connection_string_here")
+MONGO_URI = os.getenv("MONGODB_CONNECTION")
 db_client = MongoClient(MONGO_URI)
 db = db_client.NotiTronDB  # Database
 tasks_collection = db.Tasks  # Collection
@@ -22,7 +22,7 @@ intents.message_content = True  # Enable the message content intent
 bot = commands.Bot(command_prefix="/", intents=intents)
 
 # Guild ID
-GUILD_ID = int(os.getenv("GUILD_ID", "your_guild_id_here"))
+GUILD_ID = int(os.getenv("GUILD_ID"))
 
 # Timezone setup (PST)
 timezone = pytz.timezone("America/Los_Angeles")
@@ -61,7 +61,7 @@ class ReminderView(discord.ui.View):
         self.reminder_buttons = []
 
         # Add buttons for selecting reminder times
-        for hours in [1, 3, 6, 12]:
+        for hours in [1, 3, 6, 12]: # Hour ranges for the user to select
             button = ReminderButton(task, hours)
             self.reminder_buttons.append(button)
             self.add_item(button)
