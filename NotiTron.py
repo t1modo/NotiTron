@@ -143,6 +143,16 @@ class CompleteButton(discord.ui.Button):
         await interaction.response.send_message("Task marked as completed and removed from the database.", ephemeral=True)
 
 
+@bot.event
+async def on_resume():
+    print("Bot has resumed. Restoring persistent views...")
+    # Restore persistent views for incomplete tasks
+    incomplete_tasks = tasks_collection.find({"completed": False})
+    for task in incomplete_tasks:
+        view = PersistentCompleteButton(task)
+        bot.add_view(view, message_id=task.get("message_id"))
+
+
 # Slash command to add a task
 @bot.tree.command(name="add_task", description="Set a reminder for upcoming assignments!")
 async def add_task(interaction: discord.Interaction, class_name: str, assignment_name: str, due_date: str, due_time: str):
@@ -197,7 +207,9 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         reminder_view = ReminderView(task, interaction)
 
         # Send the embed with the buttons
-        await interaction.response.send_message(embed=embed, view=reminder_view)
+        message = await interaction.response.send_message(embed=embed, view=reminder_view)
+        message = await message.original_response()
+        tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"message_id": message.id}})
 
     except Exception as e:
         if not interaction.response.is_done():
