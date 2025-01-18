@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 import pytz
 import os
 import asyncio
-from dotenv import load_dotenv
 import sys
+from dotenv import load_dotenv
 
 # Load environment variables from .env file
 load_dotenv()
@@ -151,6 +151,71 @@ class CompleteButton(discord.ui.Button):
 
         await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message("Task marked as completed and removed from the database.", ephemeral=True)
+
+
+# Slash command to add a task
+@bot.tree.command(name="add_task", description="Set a reminder for upcoming assignments!")
+async def add_task(interaction: discord.Interaction, class_name: str, assignment_name: str, due_date: str, due_time: str):
+    if interaction.guild.id != GUILD_ID:
+        return
+
+    try:
+        # Parse due_date
+        try:
+            due_date_parsed = datetime.strptime(due_date, "%m/%d/%y")
+        except ValueError:
+            due_date_parsed = datetime.strptime(due_date, "%m/%d/%Y")
+
+        # Parse due_time
+        due_time = due_time.strip().upper().replace(" ", "")
+        due_time_parsed = datetime.strptime(due_time, "%I:%M%p")
+
+        # Combine date and time, then localize to PST
+        due_datetime = timezone.localize(due_date_parsed.replace(
+            hour=due_time_parsed.hour,
+            minute=due_time_parsed.minute
+        ))
+
+        # Convert datetime to ISO format (string) for MongoDB
+        due_datetime_str = due_datetime.isoformat()
+
+        # Store task in MongoDB
+        task = {
+            "class_name": class_name,
+            "assignment_name": assignment_name,
+            "due_date": due_datetime_str,
+            "author": interaction.user.name,
+            "user_id": interaction.user.id,
+            "channel_id": interaction.channel.id,
+            "completed": False,
+            "second_reminder_sent": False,  # Flag for second reminder
+        }
+        result = tasks_collection.insert_one(task)
+        task["_id"] = result.inserted_id  # Add the ID to the task dictionary
+
+        # Format due date and time for the embed
+        formatted_datetime = due_datetime.strftime("%m/%d/%Y at %I:%M %p")
+
+        # Create an embed with the task info
+        embed = discord.Embed(title=f"Task Added: {assignment_name}", color=discord.Color.red())
+        embed.add_field(name="Class", value=class_name, inline=True)
+        embed.add_field(name="Assignment", value=assignment_name, inline=True)
+        embed.add_field(name="Due Date & Time", value=formatted_datetime, inline=True)
+        embed.set_footer(text="Use the buttons below to set a second reminder or mark the task as complete.")
+
+        # Create the button view
+        reminder_view = ReminderView(task, interaction)
+
+        # Send the embed with the buttons
+        message = await interaction.response.send_message(embed=embed, view=reminder_view)
+        message = await message.original_response()
+        tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"message_id": message.id}})
+
+    except Exception as e:
+        if not interaction.response.is_done():
+            await interaction.response.send_message(f"An error occurred: {e}")
+        else:
+            print(f"Error: {e}")
 
 
 # Background task to check tasks every minute and align with whole-minute intervals
