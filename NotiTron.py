@@ -37,6 +37,13 @@ async def on_ready():
         await bot.tree.sync()
         print("Slash commands synced successfully.")
 
+        # Restore persistent views for incomplete tasks
+        print("Restoring persistent views...")
+        incomplete_tasks = tasks_collection.find({"completed": False})
+        for task in incomplete_tasks:
+            view = PersistentCompleteButton(task)
+            bot.add_view(view, message_id=task.get("message_id"))
+
         # Start background tasks
         if not check_tasks_every_minute.is_running():
             check_tasks_every_minute.start()
@@ -61,7 +68,7 @@ class ReminderView(discord.ui.View):
         self.reminder_buttons = []
 
         # Add buttons for selecting reminder times
-        for hours in [1, 3, 6, 12]: # Hour ranges for the user to select
+        for hours in [1, 3, 6, 12]:  # Hour ranges for the user to select
             button = ReminderButton(task, hours)
             self.reminder_buttons.append(button)
             self.add_item(button)
@@ -127,7 +134,7 @@ class ReminderButton(discord.ui.Button):
 
 class CompleteButton(discord.ui.Button):
     def __init__(self, task):
-        super().__init__(label="Mark as Complete", style=discord.ButtonStyle.green, custom_id="complete_task")
+        super().__init__(label="Mark as Complete", style=discord.ButtonStyle.green, custom_id=f"complete_{task['_id']}")
         self.task = task
 
     async def callback(self, interaction: discord.Interaction):
@@ -141,16 +148,6 @@ class CompleteButton(discord.ui.Button):
 
         await interaction.message.edit(embed=embed, view=None)
         await interaction.response.send_message("Task marked as completed and removed from the database.", ephemeral=True)
-
-
-@bot.event
-async def on_resume():
-    print("Bot has resumed. Restoring persistent views...")
-    # Restore persistent views for incomplete tasks
-    incomplete_tasks = tasks_collection.find({"completed": False})
-    for task in incomplete_tasks:
-        view = PersistentCompleteButton(task)
-        bot.add_view(view, message_id=task.get("message_id"))
 
 
 # Slash command to add a task
