@@ -28,6 +28,9 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 # Timezone setup (PST)
 timezone = pytz.timezone("America/Los_Angeles")
 
+# Global hashmap to track scheduled tasks
+scheduled_tasks = {}  # Key: datetime, Value: task data
+
 # Slash command setup
 @bot.event
 async def on_ready():
@@ -45,9 +48,11 @@ async def on_ready():
             view = PersistentCompleteButton(task)
             bot.add_view(view, message_id=task.get("message_id"))
 
-        # Start background tasks
-        if not check_tasks_every_minute.is_running():
-            check_tasks_every_minute.start()
+        # Start background tasks - ADD THIS LINE
+        if not check_scheduled_notifications.is_running():
+            check_scheduled_notifications.start()
+        if not check_tasks_hourly.is_running():
+            check_tasks_hourly.start()
         if not restart_server_every_hour.is_running():
             restart_server_every_hour.start()
 
@@ -122,9 +127,18 @@ class ReminderButton(discord.ui.Button):
         )
         self.task["second_reminder"] = self.hours
 
-        # Confirm the second reminder time to the user
+        # Schedule the second reminder in our hashmap
         due_datetime = datetime.fromisoformat(self.task["due_date"])
         second_reminder_time = due_datetime - timedelta(hours=self.hours)
+        
+        # Add to scheduled tasks for precise timing
+        scheduled_tasks[second_reminder_time] = {
+            "type": "second_reminder",
+            "task": self.task,
+            "reminder_hours": self.hours
+        }
+
+        # Confirm the second reminder time to the user
         formatted_time = second_reminder_time.strftime("%m/%d/%Y at %I:%M %p")
 
         await interaction.response.send_message(
@@ -143,6 +157,17 @@ class CompleteButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         # Mark the task as completed and remove it from the database
         tasks_collection.delete_one({"_id": self.task["_id"]})
+
+        # Remove from scheduled tasks if present
+        task_due_time = datetime.fromisoformat(self.task["due_date"])
+        if task_due_time in scheduled_tasks:
+            del scheduled_tasks[task_due_time]
+        
+        # Remove second reminder from scheduled tasks if present
+        if "second_reminder" in self.task:
+            second_reminder_time = task_due_time - timedelta(hours=self.task["second_reminder"])
+            if second_reminder_time in scheduled_tasks:
+                del scheduled_tasks[second_reminder_time]
 
         # Update the embed to indicate completion
         embed = interaction.message.embeds[0]
@@ -193,6 +218,12 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
         result = tasks_collection.insert_one(task)
         task["_id"] = result.inserted_id  # Add the ID to the task dictionary
 
+        # Add task to scheduled tasks for precise timing
+        scheduled_tasks[due_datetime] = {
+            "type": "due_notification",
+            "task": task
+        }
+
         # Format due date and time for the embed
         formatted_datetime = due_datetime.strftime("%m/%d/%Y at %I:%M %p")
 
@@ -218,46 +249,107 @@ async def add_task(interaction: discord.Interaction, class_name: str, assignment
             print(f"Error: {e}")
 
 
-# Background task to check tasks every minute and align with whole-minute intervals
+# Function to send notifications for scheduled tasks
+async def send_scheduled_notification(scheduled_item):
+    task_data = scheduled_item["task"]
+    notification_type = scheduled_item["type"]
+    
+    user_id = task_data["user_id"]
+    assignment_name = task_data["assignment_name"]
+    channel_id = task_data.get("channel_id")
+    
+    try:
+        channel = bot.get_channel(channel_id) if channel_id else None
+        user = await bot.fetch_user(user_id)
+        
+        if notification_type == "second_reminder":
+            reminder_hours = scheduled_item["reminder_hours"]
+            message = f"<@{user_id}>, your second reminder for task '{assignment_name}' is here! Due in {reminder_hours} hours!"
+        elif notification_type == "due_notification":
+            message = f"<@{user_id}>, your task '{assignment_name}' is due now!"
+        
+        if channel:
+            await channel.send(message)
+        else:
+            await user.send(message.replace(f"<@{user_id}>", f"Hi {user.name}"))
+            
+        # Mark second reminder as sent in database
+        if notification_type == "second_reminder":
+            tasks_collection.update_one(
+                {"_id": task_data["_id"]}, 
+                {"$set": {"second_reminder_sent": True}}
+            )
+            
+    except Exception as e:
+        print(f"Error sending notification: {e}")
+
+
+# Background task to check for notifications every minute
 @tasks.loop(minutes=1)
-async def check_tasks_every_minute():
+async def check_scheduled_notifications():
     now = datetime.now(timezone)
-    print(f"Running check_tasks_every_minute at {now}")
+    current_minute = now.replace(second=0, microsecond=0)
+    
+    # Check if any scheduled tasks are due this minute
+    tasks_to_notify = []
+    for scheduled_time, scheduled_item in list(scheduled_tasks.items()):
+        scheduled_minute = scheduled_time.replace(second=0, microsecond=0)
+        if scheduled_minute == current_minute:
+            tasks_to_notify.append((scheduled_time, scheduled_item))
+    
+    # Send notifications and remove from scheduled tasks
+    for scheduled_time, scheduled_item in tasks_to_notify:
+        await send_scheduled_notification(scheduled_item)
+        del scheduled_tasks[scheduled_time]
+
+
+# Background task to check tasks hourly and populate scheduled_tasks
+@tasks.loop(hours=1)
+async def check_tasks_hourly():
+    now = datetime.now(timezone)
+    next_hour = now + timedelta(hours=1)
+    print(f"Running hourly check at {now}")
 
     try:
-        # Check for second reminders and expired tasks
+        # Find tasks due within the next hour that aren't already scheduled
         tasks_due_soon = tasks_collection.find({
             "completed": False,
-            "second_reminder": {"$exists": True},
-            "second_reminder_sent": False
+            "due_date": {
+                "$gte": now.isoformat(),
+                "$lt": next_hour.isoformat()
+            }
         })
 
         for task in tasks_due_soon:
-            user_id = task["user_id"]
-            assignment_name = task["assignment_name"]
-            second_reminder = task.get("second_reminder")
+            due_datetime = datetime.fromisoformat(task["due_date"])
+            
+            # Add main due notification if not already scheduled
+            if due_datetime not in scheduled_tasks:
+                scheduled_tasks[due_datetime] = {
+                    "type": "due_notification",
+                    "task": task
+                }
+                print(f"Scheduled due notification for {task['assignment_name']} at {due_datetime}")
+            
+            # Add second reminder if applicable and not already sent
+            if (task.get("second_reminder") and 
+                not task.get("second_reminder_sent", False)):
+                
+                second_reminder_time = due_datetime - timedelta(hours=task["second_reminder"])
+                
+                # Only schedule if the reminder time is within the next hour
+                if (second_reminder_time >= now and 
+                    second_reminder_time < next_hour and 
+                    second_reminder_time not in scheduled_tasks):
+                    
+                    scheduled_tasks[second_reminder_time] = {
+                        "type": "second_reminder",
+                        "task": task,
+                        "reminder_hours": task["second_reminder"]
+                    }
+                    print(f"Scheduled second reminder for {task['assignment_name']} at {second_reminder_time}")
 
-            # Send second reminder if it's time
-            if second_reminder:
-                reminder_time = datetime.fromisoformat(task["due_date"]) - timedelta(hours=second_reminder)
-                if now >= reminder_time:
-                    channel_id = task.get("channel_id")
-                    channel = bot.get_channel(channel_id) if channel_id else None
-                    user = await bot.fetch_user(user_id)
-
-                    if channel:
-                        await channel.send(
-                            f"<@{user_id}>, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
-                        )
-                    else:
-                        await user.send(
-                            f"Hi {user.name}, your second reminder for task '{assignment_name}' is here! Due in {second_reminder} hours!"
-                        )
-
-                    # Mark the second reminder as sent
-                    tasks_collection.update_one({"_id": task["_id"]}, {"$set": {"second_reminder_sent": True}})
-
-        # Automatically delete expired tasks
+        # Clean up expired tasks from database
         expired_tasks = tasks_collection.find({
             "completed": False,
             "due_date": {"$lt": now.isoformat()}
@@ -266,21 +358,35 @@ async def check_tasks_every_minute():
         for task in expired_tasks:
             print(f"Deleting expired task: {task['assignment_name']} (due {task['due_date']})")
             tasks_collection.delete_one({"_id": task["_id"]})
+            
+            # Remove from scheduled tasks if present
+            task_due_time = datetime.fromisoformat(task["due_date"])
+            if task_due_time in scheduled_tasks:
+                del scheduled_tasks[task_due_time]
 
     except Exception as e:
-        print(f"Error in check_tasks_every_minute: {e}")
+        print(f"Error in check_tasks_hourly: {e}")
 
 
-@check_tasks_every_minute.before_loop
-async def before_check_tasks_every_minute():
+@check_tasks_hourly.before_loop
+async def before_check_tasks_hourly():
+    now = datetime.now(timezone)
+    minutes_to_wait = 60 - now.minute
+    seconds_to_wait = minutes_to_wait * 60 - now.second
+    print(f"Waiting {seconds_to_wait} seconds to align with the next hour.")
+    await asyncio.sleep(seconds_to_wait)
+
+
+@check_scheduled_notifications.before_loop
+async def before_check_scheduled_notifications():
     now = datetime.now(timezone)
     seconds_to_wait = 60 - now.second
     print(f"Waiting {seconds_to_wait} seconds to align with the next whole minute.")
     await asyncio.sleep(seconds_to_wait)
 
 
-# Background task to restart the server every hour
-@tasks.loop(hours=1)
+# Background task to restart the server every 24 hours (changed from 1 hour)
+@tasks.loop(hours=24)
 async def restart_server_every_hour():
     print("Restarting server...")
     os.execv(sys.executable, ['python'] + sys.argv)
@@ -289,8 +395,10 @@ async def restart_server_every_hour():
 @restart_server_every_hour.before_loop
 async def before_restart_server_every_hour():
     now = datetime.now(timezone)
-    seconds_to_wait = (60 - now.minute) * 60 - now.second
-    print(f"Waiting {seconds_to_wait} seconds to align with the next hour.")
+    # Calculate seconds until next midnight
+    next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    seconds_to_wait = (next_midnight - now).total_seconds()
+    print(f"Waiting {seconds_to_wait} seconds to align with midnight for daily restart.")
     await asyncio.sleep(seconds_to_wait)
 
 
