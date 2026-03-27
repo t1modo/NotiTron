@@ -2,18 +2,23 @@
 
 ## Overview
 
-NotiTron is a Discord bot designed to assist students and users in managing their assignments and due dates. It allows users to add tasks, receive timely reminders for upcoming deadlines, and ensures expired tasks are automatically cleaned from the system. The bot provides an efficient and reliable way to stay organized and meet academic or personal deadlines.
+NotiTron is a Discord bot designed to help students manage assignments and due dates. Users can add tasks with a due date and time, receive scheduled reminders, set an early reminder at a custom interval before the deadline, and mark tasks as complete — all through Discord slash commands and interactive buttons.
 
 ## Features
 
-- **Add Task**: Add assignments with class name, assignment name, and due date in multiple formats.
-- **Task Notifications**: Receive reminders when assignments are due within 24 hours or on the same day.
-- **Automatic Task Cleanup**: Automatically removes expired tasks to keep the task list up to date.
-- **Custom Time Zone Support**: Supports Pacific Standard Time (PST) for accurate deadline tracking.
+- **Add Task**: Add assignments with class name, assignment name, due date (MM/DD/YY or MM/DD/YYYY), and due time via `/add_task`.
+- **Due Notifications**: Automatically pings the user when their assignment is due.
+- **Early Reminders**: After adding a task, choose an early reminder 1, 3, 6, or 12 hours before the deadline.
+- **Mark as Complete**: Use the "Mark as Complete" button on any task message to delete the task and close out the reminder.
+- **Persistent Buttons**: Button views are restored on bot restart so in-progress tasks remain interactive.
+- **Automatic Task Cleanup**: Expired (past-due) tasks are automatically removed from the database during hourly checks.
+- **Timezone Support**: All times use America/Los_Angeles (Pacific Time).
+- **Daily Restart**: The bot performs a daily restart at midnight PT for reliability.
 
 ## Technologies Used
 
-- **discord.py**: For seamless interaction with the Discord API and bot development.
-- **pymongo**: To integrate MongoDB for task storage and management.
-- **MongoDB**: A NoSQL database for storing assignments and due dates.
-- **pytz**: For timezone-aware datetime management in Python.
+- **discord.py**: Discord API interaction and bot development.
+- **pymongo**: MongoDB integration for task storage.
+- **MongoDB**: NoSQL database for persisting assignments and reminders.
+- **pytz**: Timezone-aware datetime handling.
+- **python-dotenv**: Environment variable management.
