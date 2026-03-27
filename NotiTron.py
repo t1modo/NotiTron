@@ -33,9 +33,33 @@ async def on_ready():
         await bot.tree.sync()
         print("Slash commands synced.")
 
+        now = datetime.now(TZ)
         for task in tasks_collection.find({"completed": False}):
             bot.add_view(PersistentCompleteButton(task), message_id=task.get("message_id"))
-        print("Persistent views restored.")
+
+            due_datetime = datetime.fromisoformat(task["due_date"])
+            task_id_str = str(task["_id"])
+
+            due_key = (task_id_str, "due_notification")
+            if due_datetime > now and due_key not in scheduled_tasks:
+                scheduled_tasks[due_key] = {
+                    "type": "due_notification",
+                    "task": task,
+                    "scheduled_time": due_datetime,
+                }
+
+            if task.get("early_reminder") and not task.get("early_reminder_sent", False):
+                early_time = due_datetime - timedelta(hours=task["early_reminder"])
+                reminder_key = (task_id_str, "early_reminder")
+                if early_time > now and reminder_key not in scheduled_tasks:
+                    scheduled_tasks[reminder_key] = {
+                        "type": "early_reminder",
+                        "task": task,
+                        "reminder_hours": task["early_reminder"],
+                        "scheduled_time": early_time,
+                    }
+
+        print("Persistent views restored and scheduled tasks loaded.")
 
         if not check_scheduled_notifications.is_running():
             check_scheduled_notifications.start()
@@ -53,7 +77,16 @@ async def on_ready():
 class PersistentCompleteButton(discord.ui.View):
     def __init__(self, task):
         super().__init__(timeout=None)
+        self.task = task
         self.add_item(CompleteButton(task))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.task["user_id"]:
+            await interaction.response.send_message(
+                "You are not authorized to interact with these buttons.", ephemeral=True
+            )
+            return False
+        return True
 
 
 class ReminderView(discord.ui.View):
@@ -180,13 +213,28 @@ async def add_task(
             )
             return
 
-        due_time_parsed = datetime.strptime(due_time.strip().upper().replace(" ", ""), "%I:%M%p")
+        try:
+            due_time_parsed = datetime.strptime(due_time.strip().upper().replace(" ", ""), "%I:%M%p")
+        except ValueError:
+            await interaction.response.send_message(
+                "Invalid time format. Use HH:MM AM/PM (e.g. `3:30 PM`). Please retry the command.",
+                ephemeral=True,
+            )
+            return
+
         due_datetime = TZ.localize(due_date_parsed.replace(
             hour=due_time_parsed.hour,
             minute=due_time_parsed.minute,
             second=0,
             microsecond=0,
         ))
+
+        if due_datetime <= datetime.now(TZ):
+            await interaction.response.send_message(
+                "The due date and time must be in the future. Please retry the command with a valid date.",
+                ephemeral=True,
+            )
+            return
 
         task = {
             "class_name": class_name,
@@ -353,18 +401,23 @@ async def check_tasks_hourly():
                 }
                 print(f"Scheduled due notification for '{task['assignment_name']}' at {due_datetime}")
 
-            if task.get("early_reminder") and not task.get("early_reminder_sent", False):
-                second_time = due_datetime - timedelta(hours=task["early_reminder"])
-                reminder_key = (str(task["_id"]), "early_reminder")
+        for task in tasks_collection.find({
+            "completed": False,
+            "early_reminder": {"$exists": True},
+            "early_reminder_sent": {"$ne": True},
+        }):
+            due_datetime = datetime.fromisoformat(task["due_date"])
+            early_time = due_datetime - timedelta(hours=task["early_reminder"])
+            reminder_key = (str(task["_id"]), "early_reminder")
 
-                if now <= second_time < next_hour and reminder_key not in scheduled_tasks:
-                    scheduled_tasks[reminder_key] = {
-                        "type": "early_reminder",
-                        "task": task,
-                        "reminder_hours": task["early_reminder"],
-                        "scheduled_time": second_time,
-                    }
-                    print(f"Scheduled early reminder for '{task['assignment_name']}' at {second_time}")
+            if now <= early_time < next_hour and reminder_key not in scheduled_tasks:
+                scheduled_tasks[reminder_key] = {
+                    "type": "early_reminder",
+                    "task": task,
+                    "reminder_hours": task["early_reminder"],
+                    "scheduled_time": early_time,
+                }
+                print(f"Scheduled early reminder for '{task['assignment_name']}' at {early_time}")
 
         for task in tasks_collection.find({"completed": False, "due_date": {"$lt": now.isoformat()}}):
             print(f"Removing expired task: '{task['assignment_name']}' (due {task['due_date']})")
