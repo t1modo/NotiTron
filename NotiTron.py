@@ -49,9 +49,23 @@ async def on_ready():
                 }
 
             if task.get("early_reminder") and not task.get("early_reminder_sent", False):
-                early_time = due_datetime - timedelta(hours=task["early_reminder"])
+                # Prefer stored early_reminder_time; fall back to calculating it
+                if task.get("early_reminder_time"):
+                    early_time = datetime.fromisoformat(task["early_reminder_time"])
+                else:
+                    early_time = due_datetime - timedelta(hours=task["early_reminder"])
+
                 reminder_key = (task_id_str, "early_reminder")
-                if early_time > now and reminder_key not in scheduled_tasks:
+                if early_time <= now:
+                    # Missed while bot was down — send immediately as catch-up
+                    print(f"Catch-up: sending missed early reminder for '{task['assignment_name']}'")
+                    await send_scheduled_notification({
+                        "type": "early_reminder",
+                        "task": task,
+                        "reminder_hours": task["early_reminder"],
+                        "scheduled_time": early_time,
+                    })
+                elif reminder_key not in scheduled_tasks:
                     scheduled_tasks[reminder_key] = {
                         "type": "early_reminder",
                         "task": task,
@@ -140,14 +154,19 @@ class ReminderButton(discord.ui.Button):
         self.hours = hours
 
     async def callback(self, interaction: discord.Interaction):
-        tasks_collection.update_one(
-            {"_id": self.task["_id"]},
-            {"$set": {"early_reminder": self.hours}}
-        )
-        self.task["early_reminder"] = self.hours
-
         due_datetime = datetime.fromisoformat(self.task["due_date"])
         early_reminder_time = due_datetime - timedelta(hours=self.hours)
+
+        tasks_collection.update_one(
+            {"_id": self.task["_id"]},
+            {"$set": {
+                "early_reminder": self.hours,
+                "early_reminder_time": early_reminder_time.isoformat(),
+            }}
+        )
+        self.task["early_reminder"] = self.hours
+        self.task["early_reminder_time"] = early_reminder_time.isoformat()
+
         key = (str(self.task["_id"]), "early_reminder")
         scheduled_tasks[key] = {
             "type": "early_reminder",
@@ -335,13 +354,17 @@ async def handle_change(change):
                 task_id_str = str(task["_id"])
                 key = (task_id_str, "early_reminder")
                 if key not in scheduled_tasks:
-                    due_datetime = datetime.fromisoformat(task["due_date"])
-                    hours = task["early_reminder"]
-                    early_time = due_datetime - timedelta(hours=hours)
+                    # Use stored early_reminder_time if available; otherwise calculate it
+                    if task.get("early_reminder_time"):
+                        early_time = datetime.fromisoformat(task["early_reminder_time"])
+                    else:
+                        due_datetime = datetime.fromisoformat(task["due_date"])
+                        hours = task["early_reminder"]
+                        early_time = due_datetime - timedelta(hours=hours)
                     scheduled_tasks[key] = {
                         "type": "early_reminder",
                         "task": task,
-                        "reminder_hours": hours,
+                        "reminder_hours": task["early_reminder"],
                         "scheduled_time": early_time,
                     }
                     print(f"[ChangeStream] Scheduled early reminder for '{task['assignment_name']}' at {early_time}")
@@ -371,7 +394,7 @@ async def check_scheduled_notifications():
 
     due = [
         (key, item) for key, item in list(scheduled_tasks.items())
-        if item["scheduled_time"].replace(second=0, microsecond=0) == now
+        if item["scheduled_time"].replace(second=0, microsecond=0) <= now
     ]
 
     for key, item in due:
@@ -406,8 +429,11 @@ async def check_tasks_hourly():
             "early_reminder": {"$exists": True},
             "early_reminder_sent": {"$ne": True},
         }):
-            due_datetime = datetime.fromisoformat(task["due_date"])
-            early_time = due_datetime - timedelta(hours=task["early_reminder"])
+            if task.get("early_reminder_time"):
+                early_time = datetime.fromisoformat(task["early_reminder_time"])
+            else:
+                due_datetime = datetime.fromisoformat(task["due_date"])
+                early_time = due_datetime - timedelta(hours=task["early_reminder"])
             reminder_key = (str(task["_id"]), "early_reminder")
 
             if now <= early_time < next_hour and reminder_key not in scheduled_tasks:
@@ -442,9 +468,10 @@ async def before_check_tasks_hourly():
 @check_scheduled_notifications.before_loop
 async def before_check_scheduled_notifications():
     now = datetime.now(TZ)
-    seconds_to_wait = 60 - now.second
-    print(f"Waiting {seconds_to_wait}s to align notification check with the minute.")
-    await asyncio.sleep(seconds_to_wait)
+    seconds_to_wait = (60 - now.second) % 60
+    if seconds_to_wait > 0:
+        print(f"Waiting {seconds_to_wait}s to align notification check with the minute.")
+        await asyncio.sleep(seconds_to_wait)
 
 
 @tasks.loop(hours=24)
